@@ -14,12 +14,13 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::config::MAX_APP_NUM;
+use crate::config::{MAX_APP_NUM, MAX_SYSCALL_NUM};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use lazy_static::*;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+pub use task::{TaskControlBlock, TaskInfo, TaskStatus};
 
 pub use context::TaskContext;
 
@@ -51,9 +52,12 @@ lazy_static! {
     /// Global variable: TASK_MANAGER
     pub static ref TASK_MANAGER: TaskManager = {
         let num_app = get_num_app();
+        let syscall_times = [0; MAX_SYSCALL_NUM];
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            start_time: 0,
+            syscall_times: syscall_times
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -80,6 +84,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
+        task0.start_time = get_time_ms();
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -135,6 +140,30 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Get the taskInfo of current task
+    pub fn get_current_task_info(&self) -> TaskInfo {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let mut task_info = TaskInfo::new(inner.tasks[current].task_status);
+        task_info.set_syscall_times(inner.tasks[current].syscall_times);
+        task_info.set_time(get_time_ms() - inner.tasks[current].start_time);
+        task_info
+    }
+
+    /// add system call times
+    pub fn add_syscall_time(&self, index: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        if index < MAX_SYSCALL_NUM {
+            inner.tasks[current].syscall_times[index] += 1;
+        }
+    }
+
+    /// increase syscall times for current task
+    pub fn increase_current_task_syscall_tims(&self, syscall_id: usize) {
+        self.add_syscall_time(syscall_id);
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +197,17 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// increase syscalls for current task
+pub fn increase_current_task_syscall_tims(syscall_id: usize) {
+    if syscall_id >= MAX_SYSCALL_NUM {
+        return;
+    }
+    TASK_MANAGER.increase_current_task_syscall_tims(syscall_id)
+}
+
+/// get current task info
+pub fn get_current_task_info() -> TaskInfo {
+    TASK_MANAGER.get_current_task_info()
 }
